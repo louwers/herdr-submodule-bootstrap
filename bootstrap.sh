@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Initialise the submodules of a new Git worktree.
 #
-# Objects are borrowed (git clone --reference) from the same submodule in the
-# repository's main checkout, so nothing that is already on disk gets
-# downloaded again; anything missing there is fetched from the submodule's
-# real remote. Already-populated submodules are left alone, so re-running on
-# an existing worktree is safe.
+# Each submodule is cloned from the same submodule in the repository's main
+# checkout, borrowing its objects (git clone --reference) instead of copying
+# them, so nothing goes over the network. A submodule whose pinned commit the
+# main checkout doesn't have is cloned from its real remote instead, still
+# borrowing whatever objects the main checkout does have. Already-populated
+# submodules are left alone, so re-running on an existing worktree is safe.
 #
 # Usage:
 #   bootstrap.sh <worktree-path>   # run in the foreground (also for backfill)
@@ -15,29 +16,69 @@ set -euo pipefail
 
 JOBS=8
 
-# submodule_paths <checkout>: one submodule path per line
+# submodule_paths <checkout>: the paths of its submodules, NUL-terminated
 submodule_paths() {
+  local entry
   [[ -f $1/.gitmodules ]] || return 0
-  git -C "$1" config --file .gitmodules --get-regexp '^submodule\..*\.path$' | cut -d' ' -f2-
+  git -C "$1" config -z --file .gitmodules --get-regexp '^submodule\..*\.path$' |
+    while IFS= read -r -d '' entry; do printf '%s\0' "${entry#*$'\n'}"; done
+}
+
+# submodule_url <checkout> <path>: the URL registered for the submodule at <path>
+submodule_url() {
+  local key
+  key=$(git -C "$1" config --file .gitmodules --name-only --fixed-value \
+    --get-regexp '^submodule\..*\.path$' "$2") || return
+  key=${key%%$'\n'*}
+  git -C "$1" config "${key%.path}.url"
+}
+
+# reachable <git-dir> <commit>: whether one of the repository's refs reaches <commit>
+reachable() {
+  local unreached
+  unreached=$(git --git-dir="$1" rev-list -n 1 "$2" --not --all 2>/dev/null) && [[ -z $unreached ]]
 }
 
 # init_one <reference-checkout> <checkout> <path>: one submodule and its nested ones
 init_one() {
-  local ref_root=$1 root=$2 path=$3 nested
+  local ref_root=$1 root=$2 path=$3 ref_git url src head nested
   if [[ -e $root/$path/.git ]]; then
     :
   elif [[ -e $ref_root/$path/.git ]]; then
-    echo "==> $root/$path (reference: $ref_root/$path)"
-    git -C "$root" submodule update --init --reference "$ref_root/$path" -- "$path" || return
+    ref_git=$(git -C "$ref_root/$path" rev-parse --absolute-git-dir) || return
+    url=$(submodule_url "$root" "$path") || url=
+    if [[ -n $url ]] && reachable "$ref_git" "$(git -C "$root" rev-parse ":$path")"; then
+      echo "==> $root/$path (from $ref_root/$path)"
+      # Git percent-decodes file:// URLs, and -c splits at the first "=".
+      src=${ref_git//%/%25}
+      src=file://${src//=/%3D}
+      # Redirect the clone to the main checkout's copy. The clone still
+      # records the real URL as its origin, and --no-fetch keeps the checkout
+      # from going back to that remote for a commit it already has.
+      git -C "$root" -c protocol.file.allow=always -c "url.$src.insteadOf=$url" \
+        submodule update --init --no-fetch --reference "$ref_root/$path" -- "$path" || return
+      # The clone took the main checkout's local branches as its
+      # remote-tracking branches; mirror its remote-tracking branches instead.
+      git -C "$root/$path" -c protocol.file.allow=always fetch --quiet --prune --no-tags "$src" \
+        '+refs/remotes/origin/*:refs/remotes/origin/*' '^refs/remotes/origin/HEAD' || return
+      head=$(git --git-dir="$ref_git" symbolic-ref -q refs/remotes/origin/HEAD) &&
+        git -C "$root/$path" symbolic-ref refs/remotes/origin/HEAD "$head"
+    else
+      echo "==> $root/$path (reference: $ref_root/$path)"
+      git -C "$root" submodule update --init --reference "$ref_root/$path" -- "$path" || return
+    fi
   else
     echo "==> $root/$path"
     git -C "$root" submodule update --init -- "$path" || return
   fi
-  while read -r nested <&3; do
+  [[ -f $root/$path/.gitmodules ]] || return 0
+  # Register the nested submodules first, so that their URLs are known.
+  git -C "$root/$path" submodule init || return
+  while IFS= read -r -d '' nested <&3; do
     init_one "$ref_root/$path" "$root/$path" "$nested" || return
   done 3< <(submodule_paths "$root/$path")
 }
-export -f init_one submodule_paths
+export -f init_one submodule_paths submodule_url reachable
 
 quote() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
 
@@ -79,7 +120,7 @@ echo "Initialising submodules from $main_checkout (log: $log)" | tee "$log"
 # Register the top-level submodules once, up front: the parallel updates below
 # would otherwise race for the lock on the shared .git/config.
 if git -C "$worktree" submodule init >>"$log" 2>&1 &&
-  submodule_paths "$worktree" | tr '\n' '\0' |
+  submodule_paths "$worktree" |
   xargs -0 -P "$JOBS" -I{} bash -c 'init_one "$@"' _ "$main_checkout" "$worktree" {} >>"$log" 2>&1; then
   echo "Submodules ready in $((SECONDS - start))s" | tee -a "$log"
 else

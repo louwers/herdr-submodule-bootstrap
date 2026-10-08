@@ -1,6 +1,6 @@
 id = "louwers.submodule-bootstrap"
 name = "Submodule Bootstrap"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.9.0"
 description = "Initialise Git submodules in new worktrees, borrowing objects from the main checkout"
 platforms = ["linux", "macos"]

@@ -7,8 +7,8 @@ worktrees Herdr creates.
 new worktree starts out as an empty directory, and
 `git submodule update --init --recursive` would clone each of them from the
 network again. This plugin hooks Herdr's `worktree.created` event and fills
-them in. It borrows objects from the repository's main checkout, so usually
-almost nothing needs to be downloaded.
+them in. It clones each submodule from the repository's main checkout and
+shares that checkout's objects, so usually nothing needs to be downloaded.
 
 ## Install
 
@@ -16,8 +16,8 @@ almost nothing needs to be downloaded.
 herdr plugin install louwers/herdr-submodule-bootstrap
 ```
 
-Needs `bash`, `git` and `jq` on the `PATH` of the Herdr server. Tested on
-Linux.
+Needs `bash`, `git` (2.30 or later) and `jq` on the `PATH` of the Herdr
+server. Tested on Linux.
 
 ## What it does
 
@@ -28,14 +28,19 @@ When you create a worktree from Herdr (**New worktree** in the sidebar, or
    comes back once the submodules are ready, so anything you type there in the
    meantime, such as starting an agent or a build, runs after the setup.
    Other panes you open in that workspace don't wait.
-2. Each submodule is cloned with
-   `git submodule update --init --reference <main checkout>/<path>`, nested
-   submodules included, with up to 8 top-level submodules cloning at once.
-   Objects that the main checkout's copy of the submodule already has are
-   shared through Git alternates instead of copied. Anything else, such as a
-   newer pinned commit, is fetched from the submodule's own remote. Submodules
-   that aren't checked out in the main checkout are cloned normally.
-3. Submodules that are already checked out are left alone, so running the
+2. Each submodule, nested submodules included, is cloned from the same
+   submodule in the main checkout, with up to 8 top-level submodules cloning
+   at once. The clone shares the main checkout's objects through Git
+   alternates instead of copying them, and doesn't touch the network. It still
+   gets the submodule's real URL as `origin`, and its remote-tracking branches
+   match the main checkout's, as of that checkout's last fetch.
+3. If the main checkout doesn't have the commit a submodule is pinned to, such
+   as a submodule bump on a branch that you haven't checked out yet, that
+   submodule is cloned from its own remote with
+   `git submodule update --init --reference <main checkout>/<path>`. Only
+   objects that the main checkout lacks are downloaded. Submodules that aren't
+   checked out in the main checkout are cloned normally.
+4. Submodules that are already checked out are left alone, so running the
    setup again is harmless.
 
 Git's output goes to `submodule-bootstrap.log` in the worktree's Git directory
@@ -43,7 +48,7 @@ Git's output goes to `submodule-bootstrap.log` in the worktree's Git directory
 the worktree. Repositories without a `.gitmodules` file are skipped.
 
 For [MapLibre Native](https://github.com/maplibre/maplibre-native), with 62
-submodules and 1.4 GB of submodule history, a new worktree is ready in about 20
+submodules and 1.4 GB of submodule history, a new worktree is ready in about 2
 seconds.
 
 ## Existing worktrees

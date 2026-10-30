@@ -16,6 +16,12 @@ set -euo pipefail
 
 JOBS=8
 
+# The submodule updates below already run $JOBS-wide; parallel checkout on top
+# of that (a checkout.workers setting of 0 or anything but 1 — 0 means one
+# worker per logical core) oversubscribes the machine and spends most of its
+# time in the kernel on macOS. Keep each individual checkout single-threaded.
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=checkout.workers GIT_CONFIG_VALUE_0=1
+
 # submodule_paths <checkout>: the paths of its submodules, NUL-terminated
 submodule_paths() {
   local entry

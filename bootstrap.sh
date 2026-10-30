@@ -14,7 +14,7 @@
 #                                  # event from HERDR_PLUGIN_EVENT_JSON
 set -euo pipefail
 
-JOBS=8
+export JOBS=8
 
 # The submodule updates below already run $JOBS-wide; parallel checkout on top
 # of that (a checkout.workers setting of 0 or anything but 1 — 0 means one
@@ -80,9 +80,10 @@ init_one() {
   [[ -f $root/$path/.gitmodules ]] || return 0
   # Register the nested submodules first, so that their URLs are known.
   git -C "$root/$path" submodule init || return
-  while IFS= read -r -d '' nested <&3; do
-    init_one "$ref_root/$path" "$root/$path" "$nested" || return
-  done 3< <(submodule_paths "$root/$path")
+  # In parallel, like the top level: a chain of nested submodules initialised
+  # one by one would otherwise become the critical path of the whole run.
+  submodule_paths "$root/$path" |
+    xargs -0 -r -P "$JOBS" -I{} bash -c 'init_one "$@"' _ "$ref_root/$path" "$root/$path" {}
 }
 export -f init_one submodule_paths submodule_url reachable
 
